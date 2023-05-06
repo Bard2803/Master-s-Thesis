@@ -5,16 +5,17 @@ from avalanche.evaluation.metrics import forgetting_metrics, \
 accuracy_metrics, loss_metrics, timing_metrics, cpu_usage_metrics, \
 confusion_matrix_metrics, disk_usage_metrics, gpu_usage_metrics, ram_usage_metrics
 from avalanche.training.plugins import EvaluationPlugin
-from avalanche.logging import InteractiveLogger, TextLogger, TensorboardLogger
+from avalanche.logging import InteractiveLogger, TextLogger, TensorboardLogger, WandBLogger
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss
 from avalanche.models import SimpleCNN, MlpVAE, MTSimpleCNN, SimpleMLP, SlimResNet18, PNN, MLPAdapter
-from avalanche.training.supervised import Naive, Cumulative, EWC, GenerativeReplay, VAETraining, Replay, GEM, PNNStrategy
+from avalanche.training.supervised import Naive, Cumulative, EWC, GenerativeReplay, VAETraining, Replay, GEM, PNNStrategy, CWRStar
 from avalanche.training.plugins import GenerativeReplayPlugin
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
-
+import pandas as pd 
+import wandb
 
 
 def main():
@@ -43,7 +44,7 @@ def main():
 
     print(f'Using {device} device')
 
-    device = 'cpu'
+    # device = 'cpu'
 
     loggers = []
     # log to Tensorboard
@@ -53,15 +54,18 @@ def main():
     # print to stdout
     loggers.append(InteractiveLogger())
 
+    loggers.append(WandBLogger(project_name="avalanche", run_name="test"))
+
     # DEFINE THE EVALUATION PLUGIN
     # The evaluation plugin manages the metrics computation.
     # It takes as argument a list of metrics, collectes their results and returns
     # them to the strategy it is attached to.
     eval_plugin = EvaluationPlugin(
-        # accuracy_metrics(minibatch=True, epoch=True, experience=True, stream=True),
-        cpu_usage_metrics(minibatch=True, epoch=True, experience=True, stream=True),
-        gpu_usage_metrics(minibatch=True, epoch=True, gpu_id=0, experience=True, stream=True),
-        ram_usage_metrics(minibatch=True, epoch=True, experience=True, stream=True),
+        accuracy_metrics(stream=True),
+        cpu_usage_metrics(stream=True),
+        gpu_usage_metrics(gpu_id=0, stream=True),
+        ram_usage_metrics(stream=True),
+        disk_usage_metrics(stream=True),
         loggers=loggers,
         strict_checks=False
     )
@@ -69,11 +73,11 @@ def main():
     # Define the models
     # model = SimpleCNN(num_classes=50).to(device)
     model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
-    pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
-    gr_model = MlpVAE((3, 32, 32), nhid=2, device=device)
+    # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
+    # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
     print(f"Main model {model}")
-    print(f"PNN model {pnn_model}")
-    print(f"GR model {gr_model}")
+    # print(f"PNN model {pnn_model}")
+    # print(f"GR model {gr_model}")
     # model = MlpVAE((3, 32, 32), nhid=2, device=device)
 
     # model = MTSimpleCNN().to(device)
@@ -84,20 +88,24 @@ def main():
 
     optimizer = Adam(model.parameters(), lr=0.001)
     criterion = CrossEntropyLoss()
-    epochs = 1
+    epochs = 100
     batchsize_train = 100
     batchsize_eval = 100
 
     cl_strategies = [
-    VAETraining(
-        gr_model, optimizer, device=device,
-        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
-        plugins=[GenerativeReplayPlugin()],
-    ),        
-    PNNStrategy(
-        pnn_model, optimizer, criterion, device=device,
+    CWRStar(
+        model, optimizer, criterion, cwr_layer_name=None, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin
-     ), 
+     ),     
+    # VAETraining(
+    #     gr_model, optimizer, device=device,
+    #     train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
+    #     plugins=[GenerativeReplayPlugin()],
+    # ),        
+    # PNNStrategy(
+    #     pnn_model, optimizer, criterion, device=device,
+    #     train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin
+    #  ), 
     GEM(
         model, optimizer, criterion, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
@@ -117,17 +125,20 @@ def main():
     )]
 
     # TRAINING LOOP
+    results = []
     for cl_strategy in cl_strategies:
         print(f"Current training strategy: {cl_strategy}")
         for experience in train_stream:
             print(f"Experience number {experience.current_experience}")
             print(f"Classes seen so far {experience.classes_seen_so_far}")
+            print(f"Training on {len(experience.dataset)} examples")
    
-            # Seems there is only one test experience 
-            current_test_set = test_stream[0].dataset
-            print('This task contains', len(current_test_set), 'test examples')
-
             cl_strategy.train(experience)
+
+            # Evaluate on test set
+            print(f"Testing on {len(test_stream[0].dataset)} examples")
+            results.append(cl_strategy.eval(test_stream))
+            print(f"Results so far {results}")
 
 def GR_Plugin():
 
@@ -313,14 +324,30 @@ def GR_Plugin_sandbox():
 
 
 
+def wandb_import():
+    api = wandb.Api() 
+    run = api.run("continualearning/avalanche/l3fmb7v7") 
 
+    # Get the history dictionary
+    history = run.history()
 
+    # Print the keys of the history dictionary
+    print(history.keys())
+
+    history = run.scan_history()
+    GPU_W = [row["MaxGPU0Usage_Stream/eval_phase/test_stream/Task000"] for row in history]
+
+    run_df = pd.DataFrame({"GPUW_W": GPU_W})
+
+    run_df.to_csv("project1.csv")
 
 if __name__ == "__main__":
-    main()
+    # main()
+    wandb_import()
     # GR_Plugin()
     # GR_GR()
     # GR_Plugin_sandbox()
+    # test_tbplugin()
 
 # [VAETraining(
 #     model, optimizer, device=device,
