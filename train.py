@@ -246,28 +246,29 @@ def main2():
 
     optimizer = Adam(model.parameters(), lr=0.001)
     criterion = CrossEntropyLoss()
-    epochs = 100
+    epochs = 50
     batchsize_train = 100
     batchsize_eval = 100
 
-    logger = WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": "Experiment_1"})
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
-        accuracy_metrics(epoch=True),
+        accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
-        loggers=logger,
-        strict_checks=False
-    )
+        loggers=loggers,
+        strict_checks=False)
     
     cl_strategy = Naive(
         model, optimizer, criterion, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
        
     print(f"Current training strategy: {cl_strategy}")
-
     for experience in train_stream:
         print(f"Experience number {experience.current_experience}")
         print(f"Classes seen so far {experience.classes_seen_so_far}")
@@ -275,13 +276,12 @@ def main2():
 
         cl_strategy.train(experience)
 
-    # Evaluate on test set
-    print(f"Testing on {len(test_stream[0].dataset)} examples")
-    results.append(cl_strategy.eval(test_stream))
-    print(f"Evaluation on test stream:\n {results}")
+    cl_strategy.eval(test_stream)
 
-
-    logger = WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": "Experiment_1"})
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(epoch=True),
@@ -289,7 +289,7 @@ def main2():
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
-        loggers=logger,
+        loggers=loggers,
         strict_checks=False
     )
     
@@ -299,7 +299,6 @@ def main2():
      )
 
     print(f"Current training strategy: {cl_strategy}")
-    results = []
     for experience in train_stream:
         print(f"Experience number {experience.current_experience}")
         print(f"Classes seen so far {experience.classes_seen_so_far}")
@@ -307,13 +306,12 @@ def main2():
 
         cl_strategy.train(experience)
 
-    # Evaluate on test set
-    print(f"Testing on {len(test_stream[0].dataset)} examples")
-    results.append(cl_strategy.eval(test_stream))
-    print(f"Evaluation on test stream:\n {results}")
+    cl_strategy.eval(test_stream)
 
-
-    logger = WandBLogger(project_name="avalanche", run_name="GEM", params={"reinit": True, "group": "Experiment_1"})
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="GEM", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(epoch=True),
@@ -321,7 +319,7 @@ def main2():
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
-        loggers=logger,
+        loggers=loggers,
         strict_checks=False
     )
     
@@ -332,7 +330,6 @@ def main2():
      )
 
     print(f"Current training strategy: {cl_strategy}")
-    results = []
     for experience in train_stream:
         print(f"Experience number {experience.current_experience}")
         print(f"Classes seen so far {experience.classes_seen_so_far}")
@@ -340,21 +337,20 @@ def main2():
 
         cl_strategy.train(experience)
 
-    # Evaluate on test set
-    print(f"Testing on {len(test_stream[0].dataset)} examples")
-    results.append(cl_strategy.eval(test_stream))
-    print(f"Evaluation on test stream:\n {results}")
+    cl_strategy.eval(test_stream)
     
-
-    logger = WandBLogger(project_name="avalanche", run_name="EWC", params={"reinit": True, "group": "Experiment_1"})
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="EWC", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
-        accuracy_metrics(epoch=True),
+        accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
-        loggers=logger,
+        loggers=loggers,
         strict_checks=False
     )
 
@@ -364,7 +360,6 @@ def main2():
     )
 
     print(f"Current training strategy: {cl_strategy}")
-    results = []
     for experience in train_stream:
         print(f"Experience number {experience.current_experience}")
         print(f"Classes seen so far {experience.classes_seen_so_far}")
@@ -372,12 +367,12 @@ def main2():
 
         cl_strategy.train(experience)
 
-    # Evaluate on test set
-    print(f"Testing on {len(test_stream[0].dataset)} examples")
-    results.append(cl_strategy.eval(test_stream))
-    print(f"Evaluation on test stream:\n {results}")
+    cl_strategy.eval(test_stream)
 
-    logger = WandBLogger(project_name="avalanche", run_name="Cumulative", params={"reinit": True, "group": "Experiment_1"})
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Cumulative", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(epoch=True),
@@ -385,8 +380,7 @@ def main2():
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
-        loggers=logger,
-        strict_checks=False
+        loggers=loggers,
     )
 
     cl_strategy = Cumulative(
@@ -395,7 +389,6 @@ def main2():
      )
 
     print(f"Current training strategy: {cl_strategy}")
-    results = []
     for experience in train_stream:
         print(f"Experience number {experience.current_experience}")
         print(f"Classes seen so far {experience.classes_seen_so_far}")
@@ -403,10 +396,7 @@ def main2():
 
         cl_strategy.train(experience)
 
-    # Evaluate on test set
-    print(f"Testing on {len(test_stream[0].dataset)} examples")
-    results.append(cl_strategy.eval(test_stream))
-    print(f"Evaluation on test stream:\n {results}")
+    cl_strategy.eval(test_stream)
 
 
 def gem(it=5, start_ppe=4):
