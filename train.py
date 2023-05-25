@@ -1,10 +1,12 @@
 from avalanche.benchmarks.classic import CORe50
 from avalanche.benchmarks.utils import AvalancheDataset
 import torch
-from avalanche.evaluation.metrics import forgetting_metrics, \
+from avalanche.evaluation.metrics import forgetting_metrics, class_accuracy_metrics, \
 accuracy_metrics, loss_metrics, timing_metrics, cpu_usage_metrics, \
-confusion_matrix_metrics, disk_usage_metrics, gpu_usage_metrics, ram_usage_metrics
-from avalanche.training.plugins import EvaluationPlugin
+confusion_matrix_metrics, disk_usage_metrics, gpu_usage_metrics, ram_usage_metrics, \
+forward_transfer_metrics
+from avalanche.training.plugins import EvaluationPlugin, EWCPlugin, GEMPlugin, EarlyStoppingPlugin
+from avalanche.training.templates import SupervisedTemplate
 from avalanche.logging import InteractiveLogger, TextLogger, TensorboardLogger, WandBLogger
 from torch.optim import Adam
 from torch.nn import CrossEntropyLoss
@@ -23,14 +25,13 @@ def main(n_strategies):
     # Load the CORe50 dataset
     core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
 
-    # the task label of each experience.
+    # the task label of each train_experience.
     print('--- Task labels:')
     print(core50.task_labels)
 
-    # Instatiate train and test streams
+    # Instatiate train and test stream
     train_stream = core50.train_stream
     test_stream = core50.test_stream
-
 
     if torch.cuda.is_available():
         device = 'cuda:0'
@@ -77,8 +78,8 @@ def main(n_strategies):
         ))
 
     # Define the models
-    # model = SimpleCNN(num_classes=50).to(device)
-    model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
+    model = SimpleCNN(num_classes=50).to(device)
+    # model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
     # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
     # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
     print(f"Main model {model}")
@@ -94,7 +95,7 @@ def main(n_strategies):
 
     optimizer = Adam(model.parameters(), lr=0.001)
     criterion = CrossEntropyLoss()
-    epochs = 50
+    epochs = 20
     batchsize_train = 100
     batchsize_eval = 100
 
@@ -135,12 +136,12 @@ def main(n_strategies):
     results = []
     for cl_strategy in cl_strategies:
         print(f"Current training strategy: {cl_strategy}")
-        for experience in train_stream:
-            print(f"Experience number {experience.current_experience}")
-            print(f"Classes seen so far {experience.classes_seen_so_far}")
-            print(f"Training on {len(experience.dataset)} examples")
+        for train_experience in train_stream:
+            print(f"Experience number {train_experience.current_experience}")
+            print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+            print(f"Training on {len(train_experience.dataset)} examples")
    
-            cl_strategy.train(experience)
+            cl_strategy.train(train_experience)
 
         # Evaluate on test set
         print(f"Testing on {len(test_stream[0].dataset)} examples")
@@ -162,8 +163,7 @@ def GR_Plugin():
     print(f'Using {device} device')
 
 
-
-        # --- BENCHMARK CREATION
+    # --- BENCHMARK CREATION
     benchmark = CORe50(scenario="nc", mini=True, object_lvl=True)
     # ---------
 
@@ -184,9 +184,9 @@ def GR_Plugin():
     print("Starting experiment...")
     f, axarr = plt.subplots(benchmark.n_experiences, 10)
     k = 0
-    for experience in benchmark.train_stream:
-        print("Start of experience ", experience.current_experience)
-        cl_strategy.train(experience)
+    for train_experience in benchmark.train_stream:
+        print("Start of train_experience ", train_experience.current_experience)
+        cl_strategy.train(train_experience)
         print("Training completed")
 
         samples = model.generate(10)
@@ -194,7 +194,7 @@ def GR_Plugin():
 
         for j in range(10):
             axarr[k, j].imshow(samples[j, 0], cmap="gray")
-            axarr[k, 4].set_title("Generated images for experience " + str(k))
+            axarr[k, 4].set_title("Generated images for train_experience " + str(k))
         np.vectorize(lambda ax: ax.axis("off"))(axarr)
         k += 1
 
@@ -204,12 +204,12 @@ def GR_Plugin():
 
 
 
-def main2():
+def train_with_ES(group_name):
 
     # Load the CORe50 dataset
     core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
 
-    # the task label of each experience.
+    # the task label of each train_experience.
     print('--- Task labels:')
     print(core50.task_labels)
 
@@ -230,7 +230,8 @@ def main2():
 
     print(f'Using {device} device')
 
-    model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
+    model = SimpleCNN(num_classes=50).to(device)
+    # model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
     # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
     # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
     print(f"Main model {model}")
@@ -246,21 +247,239 @@ def main2():
 
     optimizer = Adam(model.parameters(), lr=0.001)
     criterion = CrossEntropyLoss()
-    epochs = 50
+    epochs = 200
     batchsize_train = 100
     batchsize_eval = 100
+    patience = 10
 
     loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": group_name}))
     loggers.append(InteractiveLogger())
     loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False)
+    
+    cl_strategy = Naive(
+        model, optimizer, criterion, device=device,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
+        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+       
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience, test_experience in zip(train_stream, test_stream):
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience, eval_streams=[test_experience])
+        cl_strategy.eval(test_stream)
+
+    # cl_strategy.eval(test_stream)
+
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False
+    )
+    
+    cl_strategy = CWRStar(
+        model, optimizer, criterion, cwr_layer_name=None, device=device,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
+        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience, test_experience in zip(train_stream, test_stream):
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience, eval_streams=[test_experience])
+
+
+    cl_strategy.eval(test_stream)
+
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="GEM", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False
+    )
+    
+    cl_strategy = GEM(
+        model, optimizer, criterion, device=device, patterns_per_exp=256, memory_strength=0.5,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
+        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience, test_experience in zip(train_stream, test_stream):
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience, eval_streams=[test_experience])
+
+    cl_strategy.eval(test_stream)
+    
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="EWC", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False
+    )
+
+    cl_strategy = EWC(
+        model, optimizer, criterion, ewc_lambda=1.0, device=device,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
+        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience, test_experience in zip(train_stream, test_stream):
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience, eval_streams=[test_experience])
+
+    cl_strategy.eval(test_stream)
+
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Cumulative", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(experience=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+    )
+
+    cl_strategy = Cumulative(
+        model, optimizer, criterion, device=device,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
+        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience, test_experience in zip(train_stream, test_stream):
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience, eval_streams=[test_experience])
+
+    cl_strategy.eval(test_stream)
+
+
+
+def train_without_ES(group_name):
+
+    # Load the CORe50 dataset
+    core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
+
+    # the task label of each train_experience.
+    print('--- Task labels:')
+    print(core50.task_labels)
+
+    # Instatiate train and test streams
+    train_stream = core50.train_stream
+    test_stream = core50.test_stream
+
+
+    if torch.cuda.is_available():
+        device = 'cuda:0'
+        torch.backends.cudnn.benchmark = True
+        device_count = torch.cuda.device_count()
+        print(f"Found {device_count} CUDA GPU devices.")
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
+
+    print(f'Using {device} device')
+
+    model = SimpleCNN(num_classes=50).to(device)
+    # model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
+    # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
+    # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
+    print(f"Main model {model}")
+    # print(f"PNN model {pnn_model}")
+    # print(f"GR model {gr_model}")
+    # model = MlpVAE((3, 32, 32), nhid=2, device=device)
+
+    # model = MTSimpleCNN().to(device)
+
+    # model = SimpleMLP(num_classes=50, input_size=(3,32,32), hidden_size=32, hidden_layers = 2, drop_rate=0.5)
+
+    # model = SlimResNet18(nclasses=50)
+
+    optimizer = Adam(model.parameters(), lr=0.001)
+    criterion = CrossEntropyLoss()
+    epochs = 80
+    batchsize_train = 100
+    batchsize_eval = 100
+
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        # forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
         loggers=loggers,
         strict_checks=False)
     
@@ -269,134 +488,217 @@ def main2():
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
        
     print(f"Current training strategy: {cl_strategy}")
-    for experience in train_stream:
-        print(f"Experience number {experience.current_experience}")
-        print(f"Classes seen so far {experience.classes_seen_so_far}")
-        print(f"Training on {len(experience.dataset)} examples")
+    for train_experience in train_stream:
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(experience)
-
-    cl_strategy.eval(test_stream)
+        cl_strategy.train(train_experience)
+        cl_strategy.eval(test_stream)
+ 
 
     loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": group_name}))
     loggers.append(InteractiveLogger())
     loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
-        accuracy_metrics(epoch=True),
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
+        # forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
         loggers=loggers,
         strict_checks=False
     )
     
     cl_strategy = CWRStar(
         model, optimizer, criterion, cwr_layer_name=None, device=device,
-        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin
-     )
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
 
     print(f"Current training strategy: {cl_strategy}")
-    for experience in train_stream:
-        print(f"Experience number {experience.current_experience}")
-        print(f"Classes seen so far {experience.classes_seen_so_far}")
-        print(f"Training on {len(experience.dataset)} examples")
+    for train_experience in train_stream:
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(experience)
+        cl_strategy.train(train_experience)
+
 
     cl_strategy.eval(test_stream)
 
     loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="GEM", params={"reinit": True, "group": "Experiment_1"}))
-    loggers.append(InteractiveLogger())
-    loggers.append(TextLogger(open('log.txt', 'a')))
-
-    eval_plugin = EvaluationPlugin(
-        accuracy_metrics(epoch=True),
-        cpu_usage_metrics(epoch=True),
-        gpu_usage_metrics(gpu_id=0, epoch=True),
-        ram_usage_metrics(epoch=True),
-        disk_usage_metrics(epoch=True),
-        loggers=loggers,
-        strict_checks=False
-    )
-    
-    cl_strategy = GEM(
-        model, optimizer, criterion, device=device,
-        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
-        patterns_per_exp=8
-     )
-
-    print(f"Current training strategy: {cl_strategy}")
-    for experience in train_stream:
-        print(f"Experience number {experience.current_experience}")
-        print(f"Classes seen so far {experience.classes_seen_so_far}")
-        print(f"Training on {len(experience.dataset)} examples")
-
-        cl_strategy.train(experience)
-
-    cl_strategy.eval(test_stream)
-    
-    loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="EWC", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(WandBLogger(project_name="avalanche", run_name="GEM", params={"reinit": True, "group": group_name}))
     loggers.append(InteractiveLogger())
     loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
+        # forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False
+    )
+    
+    cl_strategy = GEM(
+        model, optimizer, criterion, device=device, patterns_per_exp=256, memory_strength=0.5,
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
+
+    print(f"Current training strategy: {cl_strategy}")
+    for train_experience in train_stream:
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
+
+        cl_strategy.train(train_experience)
+
+    cl_strategy.eval(test_stream)
+    
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="EWC", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        # forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
         loggers=loggers,
         strict_checks=False
     )
 
     cl_strategy = EWC(
         model, optimizer, criterion, ewc_lambda=1.0, device=device,
-        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin
-    )
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
 
     print(f"Current training strategy: {cl_strategy}")
-    for experience in train_stream:
-        print(f"Experience number {experience.current_experience}")
-        print(f"Classes seen so far {experience.classes_seen_so_far}")
-        print(f"Training on {len(experience.dataset)} examples")
+    for train_experience in train_stream:
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(experience)
+        cl_strategy.train(train_experience)
 
     cl_strategy.eval(test_stream)
 
     loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="Cumulative", params={"reinit": True, "group": "Experiment_1"}))
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Cumulative", params={"reinit": True, "group": group_name}))
     loggers.append(InteractiveLogger())
     loggers.append(TextLogger(open('log.txt', 'a')))
 
     eval_plugin = EvaluationPlugin(
-        accuracy_metrics(epoch=True),
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
         cpu_usage_metrics(epoch=True),
         gpu_usage_metrics(gpu_id=0, epoch=True),
         ram_usage_metrics(epoch=True),
         disk_usage_metrics(epoch=True),
+        # forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
         loggers=loggers,
     )
 
     cl_strategy = Cumulative(
         model, optimizer, criterion, device=device,
-        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin
-     )
+        train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin)
 
     print(f"Current training strategy: {cl_strategy}")
-    for experience in train_stream:
-        print(f"Experience number {experience.current_experience}")
-        print(f"Classes seen so far {experience.classes_seen_so_far}")
-        print(f"Training on {len(experience.dataset)} examples")
+    for train_experience in train_stream:
+        print(f"Experience number {train_experience.current_experience}")
+        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+        print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(experience)
+        cl_strategy.train(train_experience)
 
     cl_strategy.eval(test_stream)
+
+
+
+def main3(group_name):
+
+    # Load the CORe50 dataset
+    core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
+
+    # the task label of each train_experience.
+    print('--- Task labels:')
+    print(core50.task_labels)
+
+    # Instatiate train and test streams
+    train_stream = core50.train_stream
+    test_stream = core50.test_stream
+
+
+    if torch.cuda.is_available():
+        device = 'cuda:0'
+        torch.backends.cudnn.benchmark = True
+        device_count = torch.cuda.device_count()
+        print(f"Found {device_count} CUDA GPU devices.")
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
+
+    print(f'Using {device} device')
+
+    model = SimpleCNN(num_classes=50).to(device)
+    # model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
+    # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
+    # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
+    print(f"Main model {model}")
+    # print(f"PNN model {pnn_model}")
+    # print(f"GR model {gr_model}")
+    # model = MlpVAE((3, 32, 32), nhid=2, device=device)
+
+    # model = MTSimpleCNN().to(device)
+
+    # model = SimpleMLP(num_classes=50, input_size=(3,32,32), hidden_size=32, hidden_layers = 2, drop_rate=0.5)
+
+    # model = SlimResNet18(nclasses=50)
+
+    optimizer = Adam(model.parameters(), lr=0.001)
+    criterion = CrossEntropyLoss()
+    epochs = 20
+    batchsize_train = 100
+    batchsize_eval = 100
+
+    loggers = []
+    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": group_name}))
+    loggers.append(InteractiveLogger())
+    loggers.append(TextLogger(open('log.txt', 'a')))
+
+    eval_plugin = EvaluationPlugin(
+        accuracy_metrics(epoch=True, stream=True),
+        class_accuracy_metrics(epoch=True, stream=True),
+        cpu_usage_metrics(epoch=True),
+        gpu_usage_metrics(gpu_id=0, epoch=True),
+        ram_usage_metrics(epoch=True),
+        disk_usage_metrics(epoch=True),
+        forward_transfer_metrics(stream=True),
+        forgetting_metrics(stream=True),
+        loggers=loggers,
+        strict_checks=False)
+    
+    # Strategies
+    ewc = EWCPlugin(ewc_lambda=0.001)
+
+
+    strategy = SupervisedTemplate(
+        model, optimizer, criterion,
+        plugins=[eval_plugin, ewc])
+
 
 
 def gem(it=5, start_ppe=4):
@@ -404,7 +706,7 @@ def gem(it=5, start_ppe=4):
     # Load the CORe50 dataset
     core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
 
-    # the task label of each experience.
+    # the task label of each train_experience.
     print('--- Task labels:')
     print(core50.task_labels)
 
@@ -461,7 +763,7 @@ def gem(it=5, start_ppe=4):
             strict_checks=False
         )
 
-        print(f"Patterns per experience: {patterns_per_experience}")
+        print(f"Patterns per train_experience: {patterns_per_experience}")
         cl_strategy = GEM(
             model, optimizer, criterion, device=device,
             train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
@@ -470,12 +772,12 @@ def gem(it=5, start_ppe=4):
 
         print(f"Current training strategy: {cl_strategy}")
         results = []
-        for experience in train_stream:
-            print(f"Experience number {experience.current_experience}")
-            print(f"Classes seen so far {experience.classes_seen_so_far}")
-            print(f"Training on {len(experience.dataset)} examples")
+        for train_experience in train_stream:
+            print(f"Experience number {train_experience.current_experience}")
+            print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+            print(f"Training on {len(train_experience.dataset)} examples")
 
-            cl_strategy.train(experience)
+            cl_strategy.train(train_experience)
 
         # Evaluate on test set
         print(f"Testing on {len(test_stream[0].dataset)} examples")
@@ -489,7 +791,7 @@ def ewc(it=5, ewc_lambda=0.25):
     # Load the CORe50 dataset
     core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
 
-    # the task label of each experience.
+    # the task label of each train_experience.
     print('--- Task labels:')
     print(core50.task_labels)
 
@@ -555,12 +857,12 @@ def ewc(it=5, ewc_lambda=0.25):
 
         print(f"Current training strategy: {cl_strategy}")
         results = []
-        for experience in train_stream:
-            print(f"Experience number {experience.current_experience}")
-            print(f"Classes seen so far {experience.classes_seen_so_far}")
-            print(f"Training on {len(experience.dataset)} examples")
+        for train_experience in train_stream:
+            print(f"Experience number {train_experience.current_experience}")
+            print(f"Classes seen so far {train_experience.classes_seen_so_far}")
+            print(f"Training on {len(train_experience.dataset)} examples")
 
-            cl_strategy.train(experience)
+            cl_strategy.train(train_experience)
 
         # Evaluate on test set
         print(f"Testing on {len(test_stream[0].dataset)} examples")
@@ -600,10 +902,10 @@ def GR_GR():
 
     eval_plugin = EvaluationPlugin(
         accuracy_metrics(
-            minibatch=True, epoch=True, experience=True, stream=True
+            minibatch=True, epoch=True, train_experience=True, stream=True
         ),
-        loss_metrics(minibatch=True, epoch=True, experience=True, stream=True),
-        forgetting_metrics(experience=True),
+        loss_metrics(minibatch=True, epoch=True, train_experience=True, stream=True),
+        forgetting_metrics(train_experience=True),
         loggers=[interactive_logger],
     )
 
@@ -622,9 +924,9 @@ def GR_GR():
     # TRAINING LOOP
     print("Starting experiment...")
     results = []
-    for experience in benchmark.train_stream:
-        print("Start of experience ", experience.current_experience)
-        cl_strategy.train(experience)
+    for train_experience in benchmark.train_stream:
+        print("Start of train_experience ", train_experience.current_experience)
+        cl_strategy.train(train_experience)
         print("Training completed")
 
         print("Computing accuracy on the whole test set")
@@ -656,10 +958,10 @@ def GR_Plugin_sandbox():
 
     eval_plugin = EvaluationPlugin(
     accuracy_metrics(
-        minibatch=True, epoch=True, experience=True, stream=True
+        minibatch=True, epoch=True, train_experience=True, stream=True
     ),
-    loss_metrics(minibatch=True, epoch=True, experience=True, stream=True),
-    forgetting_metrics(experience=True),
+    loss_metrics(minibatch=True, epoch=True, train_experience=True, stream=True),
+    forgetting_metrics(train_experience=True),
     )
 
     # CREATE THE STRATEGY INSTANCE (GenerativeReplay)
@@ -678,9 +980,9 @@ def GR_Plugin_sandbox():
     print("Starting experiment...")
     f, axarr = plt.subplots(benchmark.n_experiences, 10)
     k = 0
-    for experience in benchmark.train_stream:
-        print("Start of experience ", experience.current_experience)
-        cl_strategy.train(experience)
+    for train_experience in benchmark.train_stream:
+        print("Start of train_experience ", train_experience.current_experience)
+        cl_strategy.train(train_experience)
         print("Training completed")
 
         samples = model.generate(10)
@@ -688,13 +990,30 @@ def GR_Plugin_sandbox():
 
         for j in range(10):
             axarr[k, j].imshow(samples[j, 0], cmap="gray")
-            axarr[k, 4].set_title("Generated images for experience " + str(k))
+            axarr[k, 4].set_title("Generated images for train_experience " + str(k))
         np.vectorize(lambda ax: ax.axis("off"))(axarr)
         k += 1
 
     f.subplots_adjust(hspace=1.2)
     plt.savefig("VAE_output_per_exp")
     plt.show()
+
+
+def train_split():
+
+    # Load the CORe50 dataset
+    core50 = CORe50(scenario="nc", mini=True, object_lvl=True)
+
+    # the task label of each train_experience.
+    print('--- Task labels:')
+    print(core50.task_labels)
+
+    # Instatiate train and test streams
+    train_stream = core50.train_stream[0]
+    test_stream = core50.test_stream
+
+
+    print("Length", len(train_stream[0].dataset))
 
 
 
@@ -716,7 +1035,7 @@ def wandb_import():
     run_df.to_csv("project1.csv")
 
 if __name__ == "__main__":
-    main2()
+    train_without_ES("Experiment_2")
     # wandb_import()
     # GR_Plugin()
     # GR_GR()
@@ -724,6 +1043,7 @@ if __name__ == "__main__":
     # test_tbplugin()
     # gem()
     # ewc()
+    # train_split()
 
 # [VAETraining(
 #     model, optimizer, device=device,
