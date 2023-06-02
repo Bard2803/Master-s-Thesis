@@ -5,12 +5,13 @@ from avalanche.evaluation.metrics import forgetting_metrics, class_accuracy_metr
 accuracy_metrics, loss_metrics, timing_metrics, cpu_usage_metrics, \
 confusion_matrix_metrics, disk_usage_metrics, gpu_usage_metrics, ram_usage_metrics, \
 forward_transfer_metrics
-from avalanche.training.plugins import EvaluationPlugin, EWCPlugin, GEMPlugin, EarlyStoppingPlugin
+from avalanche.training.plugins import EvaluationPlugin, EWCPlugin, EarlyStoppingPlugin
 from avalanche.training.templates import SupervisedTemplate
-from avalanche.logging import InteractiveLogger, TextLogger, TensorboardLogger, WandBLogger
+from avalanche.logging import InteractiveLogger, TextLogger, WandBLogger
 from torch.optim import Adam
+from avalanche.benchmarks.utils import AvalancheDataset
 from torch.nn import CrossEntropyLoss
-from avalanche.models import SimpleCNN, MlpVAE, MTSimpleCNN, SimpleMLP, SlimResNet18, PNN, MLPAdapter
+from avalanche.models import SimpleCNN, MlpVAE, SimpleMLP, SlimResNet18, PNN, MLPAdapter
 from avalanche.training.supervised import Naive, Cumulative, EWC, GenerativeReplay, VAETraining, Replay, GEM, PNNStrategy, CWRStar
 from avalanche.training.plugins import GenerativeReplayPlugin
 import numpy as np
@@ -18,6 +19,10 @@ import matplotlib.pyplot as plt
 import torch.nn as nn
 import pandas as pd 
 import wandb
+
+from avalanche.benchmarks.utils import make_classification_dataset
+from sklearn.model_selection import train_test_split
+from avalanche.benchmarks.generators import benchmark_with_validation_stream
 
 
 def main(n_strategies):
@@ -203,7 +208,6 @@ def GR_Plugin():
     plt.show()
 
 
-
 def train_with_ES(group_name):
 
     # Load the CORe50 dataset
@@ -213,10 +217,11 @@ def train_with_ES(group_name):
     print('--- Task labels:')
     print(core50.task_labels)
 
-    # Instatiate train and test streams
+    # Instatiate train, validation and test streams
+    core50 = benchmark_with_validation_stream(core50, 0.2)
     train_stream = core50.train_stream
+    val_stream = core50.valid_stream
     test_stream = core50.test_stream
-
 
     if torch.cuda.is_available():
         device = 'cuda:0'
@@ -231,19 +236,7 @@ def train_with_ES(group_name):
     print(f'Using {device} device')
 
     model = SimpleCNN(num_classes=50).to(device)
-    # model = SimpleMLP(num_classes=50, input_size=32*32*3, hidden_size=32*32*3, hidden_layers=4, drop_rate=0.5).to(device)
-    # pnn_model = PNN(num_layers=4, in_features=32*32*3, hidden_features_per_column=32*32*3).to(device)
-    # gr_model = MlpVAE((3, 32, 32), nhid=2, n_classes=50, device=device)
     print(f"Main model {model}")
-    # print(f"PNN model {pnn_model}")
-    # print(f"GR model {gr_model}")
-    # model = MlpVAE((3, 32, 32), nhid=2, device=device)
-
-    # model = MTSimpleCNN().to(device)
-
-    # model = SimpleMLP(num_classes=50, input_size=(3,32,32), hidden_size=32, hidden_layers = 2, drop_rate=0.5)
-
-    # model = SlimResNet18(nclasses=50)
 
     optimizer = Adam(model.parameters(), lr=0.001)
     criterion = CrossEntropyLoss()
@@ -253,7 +246,6 @@ def train_with_ES(group_name):
     patience = 10
 
     loggers = []
-    loggers.append(WandBLogger(project_name="avalanche", run_name="Naive", params={"reinit": True, "group": group_name}))
     loggers.append(InteractiveLogger())
     loggers.append(TextLogger(open('log.txt', 'a')))
 
@@ -272,18 +264,23 @@ def train_with_ES(group_name):
     cl_strategy = Naive(
         model, optimizer, criterion, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
-        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+        plugins=[EarlyStoppingPlugin(patience, "val_stream", "Top1_Acc_Stream")], eval_every=patience)
        
     print(f"Current training strategy: {cl_strategy}")
-    for train_experience, test_experience in zip(train_stream, test_stream):
-        print(f"Experience number {train_experience.current_experience}")
-        print(f"Classes seen so far {train_experience.classes_seen_so_far}")
-        print(f"Training on {len(train_experience.dataset)} examples")
+    for train_experience, val_experience, test_experience in zip(train_stream, val_stream, test_stream):
+        print(f"Experience number train {train_experience.current_experience}")
+        print(f"Classes seen so far train {train_experience.classes_seen_so_far}")
+        print(f"Training on train {len(train_experience.dataset)} examples")
+        print(f"Experience number validation {val_experience.current_experience}")
+        print(f"Classes seen so far validation {val_experience.classes_seen_so_far}")
+        print(f"Training on validation {len(val_experience.dataset)} examples")    
+        print(f"Experience number test {test_experience.current_experience}")
+        print(f"Classes seen so far test {test_experience.classes_seen_so_far}")
+        print(f"Training on test {len(test_experience.dataset)} examples")
 
-        cl_strategy.train(train_experience, eval_streams=[test_experience])
-        cl_strategy.eval(test_stream)
+        cl_strategy.train(train_experience, eval_streams=[val_experience])
 
-    # cl_strategy.eval(test_stream)
+    cl_strategy.eval(test_stream)
 
     loggers = []
     loggers.append(WandBLogger(project_name="avalanche", run_name="CWRStar", params={"reinit": True, "group": group_name}))
@@ -306,16 +303,15 @@ def train_with_ES(group_name):
     cl_strategy = CWRStar(
         model, optimizer, criterion, cwr_layer_name=None, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
-        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+        plugins=[EarlyStoppingPlugin(patience, "val_stream", "Top1_Acc_Stream")], eval_every=patience)
 
     print(f"Current training strategy: {cl_strategy}")
-    for train_experience, test_experience in zip(train_stream, test_stream):
+    for train_experience, val_experience, test_experience in zip(train_stream, test_stream):
         print(f"Experience number {train_experience.current_experience}")
         print(f"Classes seen so far {train_experience.classes_seen_so_far}")
         print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(train_experience, eval_streams=[test_experience])
-
+        cl_strategy.train(train_experience, eval_streams=[val_experience, test_experience])
 
     cl_strategy.eval(test_stream)
 
@@ -340,15 +336,15 @@ def train_with_ES(group_name):
     cl_strategy = GEM(
         model, optimizer, criterion, device=device, patterns_per_exp=256, memory_strength=0.5,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin,
-        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+        plugins=[EarlyStoppingPlugin(patience, "val_stream")], eval_every=patience)
 
     print(f"Current training strategy: {cl_strategy}")
-    for train_experience, test_experience in zip(train_stream, test_stream):
+    for train_experience, val_experience, test_experience in zip(train_stream, test_stream):
         print(f"Experience number {train_experience.current_experience}")
         print(f"Classes seen so far {train_experience.classes_seen_so_far}")
         print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(train_experience, eval_streams=[test_experience])
+        cl_strategy.train(train_experience, eval_streams=[val_experience, test_experience])
 
     cl_strategy.eval(test_stream)
     
@@ -373,15 +369,15 @@ def train_with_ES(group_name):
     cl_strategy = EWC(
         model, optimizer, criterion, ewc_lambda=1.0, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
-        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+        plugins=[EarlyStoppingPlugin(patience, "val_stream")], eval_every=patience)
 
     print(f"Current training strategy: {cl_strategy}")
-    for train_experience, test_experience in zip(train_stream, test_stream):
+    for train_experience, val_experience, test_experience in zip(train_stream, test_stream):
         print(f"Experience number {train_experience.current_experience}")
         print(f"Classes seen so far {train_experience.classes_seen_so_far}")
         print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(train_experience, eval_streams=[test_experience])
+        cl_strategy.train(train_experience, eval_streams=[val_experience, test_experience])
 
     cl_strategy.eval(test_stream)
 
@@ -405,15 +401,15 @@ def train_with_ES(group_name):
     cl_strategy = Cumulative(
         model, optimizer, criterion, device=device,
         train_mb_size=batchsize_train, train_epochs=epochs, eval_mb_size=batchsize_eval, evaluator=eval_plugin, \
-        plugins=[EarlyStoppingPlugin(patience, "test_stream")], eval_every=patience)
+        plugins=[EarlyStoppingPlugin(patience, "val_stream")], eval_every=patience)
 
     print(f"Current training strategy: {cl_strategy}")
-    for train_experience, test_experience in zip(train_stream, test_stream):
+    for train_experience, val_experience, test_experience in zip(train_stream, test_stream):
         print(f"Experience number {train_experience.current_experience}")
         print(f"Classes seen so far {train_experience.classes_seen_so_far}")
         print(f"Training on {len(train_experience.dataset)} examples")
 
-        cl_strategy.train(train_experience, eval_streams=[test_experience])
+        cl_strategy.train(train_experience, eval_streams=[val_experience, test_experience])
 
     cl_strategy.eval(test_stream)
 
@@ -1035,7 +1031,8 @@ def wandb_import():
     run_df.to_csv("project1.csv")
 
 if __name__ == "__main__":
-    train_without_ES("Experiment_2")
+    # train_without_ES("Experiment_2")
+    train_with_ES("Experiment_3")
     # wandb_import()
     # GR_Plugin()
     # GR_GR()
