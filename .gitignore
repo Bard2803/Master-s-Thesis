@@ -1,3 +1,4 @@
 log.txt
 wandb/
 .DS_Store
+.vscode
