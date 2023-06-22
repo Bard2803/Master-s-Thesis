@@ -7,7 +7,7 @@ confusion_matrix_metrics, disk_usage_metrics, gpu_usage_metrics, ram_usage_metri
 forward_transfer_metrics
 from avalanche.training.plugins import EvaluationPlugin, EWCPlugin, EarlyStoppingPlugin
 from avalanche.training.templates import SupervisedTemplate
-from avalanche.logging import InteractiveLogger, TextLogger, WandBLogger
+from avalanche.logging import InteractiveLogger, TextLogger, WandBLogger, TensorboardLogger
 from torch.optim import Adam
 from avalanche.benchmarks.utils import AvalancheDataset
 from torch.nn import CrossEntropyLoss
@@ -424,6 +424,7 @@ def train_with_ES(group_name):
 
     cl_strategy.eval(test_stream)
 
+
 def train_iteratively(project_name, num_runs=5):
 
     # Load the CORe50 dataset
@@ -433,12 +434,16 @@ def train_iteratively(project_name, num_runs=5):
     val_stream = core50.valid_stream
     test_stream = core50.test_stream
 
-    # Detect device
     if torch.cuda.is_available():
         device = 'cuda:0'
         torch.backends.cudnn.benchmark = True
+        device_count = torch.cuda.device_count()
+        print(f"Found {device_count} CUDA GPU devices.")
+    elif torch.backends.mps.is_available():
+        device = 'mps'
     else:
         device = 'cpu'
+
     print(f'Using {device} device')
 
     # Parameters
@@ -446,7 +451,7 @@ def train_iteratively(project_name, num_runs=5):
     batchsize_train = 100
     batchsize_eval = 100
     patience = 5
-    eval_every = 5
+    eval_every = 1
 
     # Define list of strategies
     strategies = ['Naive', 'CWRStar', 'GEM', 'EWC', 'Cumulative']  # Add the names of other strategies here.
@@ -461,7 +466,8 @@ def train_iteratively(project_name, num_runs=5):
 
             # Configure WandB logger
             wandb.init(project=project_name, name=strategy_name)
-            loggers = [WandBLogger(), InteractiveLogger(), TextLogger(open(f'log_{strategy_name}.txt', 'a'))]
+
+            loggers = [WandBLogger(), InteractiveLogger(), TensorboardLogger(), TextLogger(open(f'log_{strategy_name}.txt', 'a'))]
 
             # Configure evaluation plugin
             eval_plugin = EvaluationPlugin(
@@ -526,10 +532,6 @@ def train_iteratively(project_name, num_runs=5):
             # Finish the current WandB run
             wandb.finish()
 
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import wandb
 
 def extract_metrics(project_name):
     # Login to the wandb
@@ -547,6 +549,8 @@ def extract_metrics(project_name):
         history['run_id'] = run.id
         history['strategy_name'] = run.name.split('_')[0]
         data = pd.concat([data, history], ignore_index=True)
+
+    data.to_excel("output1.xlsx", index=False)
 
     # Add a helper column for the order of appearance within each strategy group
     data['order'] = data.groupby(['strategy_name']).cumcount() // 5
@@ -590,7 +594,7 @@ def extract_metrics(project_name):
                          color=colors[i % len(colors)], alpha=0.2)
 
     # Adding labels and title
-    plt.xlabel('Entry number')
+    plt.xlabel('Epochs')
     plt.ylabel('Mean Accuracy')
     plt.title('Mean Accuracies for Different Strategies with Variance')
     plt.legend()
@@ -598,6 +602,36 @@ def extract_metrics(project_name):
     # Show plot
     plt.show()
 
+def extract_convergence(project_name):
+    # Login to the wandb
+    wandb.login()
+    # Extract the metrics from WandB after all the runs
+    api = wandb.Api()
+    runs = api.runs(project_name)
+
+    # Initialize empty DataFrame
+    data = pd.DataFrame()
+
+    counts = []
+    counter = 0
+    # Fetch the logged metrics for each run
+    for run in runs:
+        history = run.history()
+        history = pd.DataFrame(history)
+        for index, row in history.iterrows():
+            if str(row['TrainingExperience']).split('.')[0].isdigit():
+                counter += 1
+                # Append the count to the list and reset the counter
+                counts.append(counter)
+                counter = 0
+            else:
+                counter += 1
+
+    print("COUNTS", counts)
+
+    history.to_excel("convergence_output1.xlsx")
+
+    print("finished extracting convergence")
 
 
 
@@ -1223,9 +1257,10 @@ def wandb_import():
 if __name__ == "__main__":
     # train_without_ES("Experiment_2")
     # train_with_ES("Experiment_3")
-    project_name = "MS_thesis_0"
+    project_name = "MS_thesis_1"
     # train_iteratively(project_name)
-    extract_metrics(project_name)
+    # extract_metrics(project_name)
+    extract_convergence(project_name)
     # wandb_import()
     # GR_Plugin()
     # GR_GR()
