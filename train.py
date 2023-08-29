@@ -1934,7 +1934,8 @@ def train_iteratively_ES(project_name, num_runs):
             wandb.finish()
 
 
-def extract_metrics(project_name):
+
+def extract_metrics(project_name, metric, description):
     # Login to the wandb
     wandb.login()
     # Extract the metrics from WandB after all the runs
@@ -1945,65 +1946,59 @@ def extract_metrics(project_name):
 
     # Fetch the logged metrics for each run
     for run in runs:
-        history = run.history()
+        history = run.history() # 'default or system'
         history['run_id'] = run.id
         history['strategy_name'] = run.name
         data = pd.concat([data, history], ignore_index=True)
 
-    data.to_excel("output1.xlsx", index=False)
+    data.to_excel("metrics.xlsx", index=False)
 
-    # Add a helper column for the order of appearance within each strategy group
-    data['order'] = data.groupby(['strategy_name']).cumcount() // 5
+    # Calculate mean gpu_usage per runtime for each strategy
+    data.interpolate(inplace=True)
 
-    # Group by 'strategy' and 'order', then calculate mean accuracy and variance
-    grouped = data.groupby(['strategy_name', 'order'])['Top1_Acc_Epoch/train_phase/train_stream/Task000']
-    mean_accuracies = grouped.mean().reset_index()
-    variances = grouped.var().reset_index()
+    # Create a helper column to detect changes in strategy_name
+    data['index_run'] = data.groupby("run_id").cumcount()
+    data[metric] = data[metric]*100
 
-    # Pivot the table to have strategies as columns
-    result_means = mean_accuracies.pivot(index='order', columns='strategy_name', values='Top1_Acc_Epoch/train_phase/train_stream/Task000')
-    result_variances = variances.pivot(index='order', columns='strategy_name', values='Top1_Acc_Epoch/train_phase/train_stream/Task000')
+    df_mean = data.groupby(["strategy_name", "index_run"])[metric, "_step"].mean().reset_index()
+    df_std = data.groupby(["strategy_name", "index_run"])[metric].std().reset_index()
+    df_std['_step'] = data.groupby(["strategy_name", "index_run"])["_step"].mean().reset_index()["_step"]
 
-    # Convert the pivoted DataFrame to a dictionary with strategies as keys and lists of means as values
-    result_means_dict = result_means.to_dict(orient='list')
-    result_variances_dict = result_variances.to_dict(orient='list')
+    # Pivot data to have strategies as columns
+    pivot_table = df_mean.pivot(index='_step', columns='strategy_name', values=metric)
+    pivot_table_std = df_std.pivot(index='_step', columns='strategy_name', values=metric)
 
-    # Plotting
+    pivot_table.interpolate(method='akima', inplace=True, limit=10)
+    pivot_table_std.interpolate(method='akima', inplace=True, limit=10)
+
     plt.figure(figsize=(12, 6))
 
-    # Define colors and line styles for each strategy
+    # Define colors for each strategy
     colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
-    linestyles = ['-', '--', '-.', ':']
 
     # Loop through each strategy
-    for i, strategy in enumerate(result_means_dict.keys()):
-        means = result_means_dict[strategy]
-        std_dev = np.sqrt(result_variances_dict[strategy])
-        x = range(1, len(means) + 1)
-        
+    for i, strategy in enumerate(pivot_table.columns):
+        means = pivot_table[strategy] 
+        stds = pivot_table_std[strategy] 
+        x = pivot_table.index 
         # Plot means for this strategy with customizations
         plt.plot(x, means,
-                 label=strategy,
-                 linewidth=2,                 # Increase line width
-                 color=colors[i % len(colors)], # Set different colors
-                 linestyle=linestyles[i % len(linestyles)], # Set different line styles
-                 marker='o')                  # Use markers for each point
+                label=strategy,
+                linewidth=2,
+                color=colors[i % len(colors)])
         
         # Add variance as shadowed region
-        plt.fill_between(x, np.subtract(means, std_dev), np.add(means, std_dev),
-                         color=colors[i % len(colors)], alpha=0.2)
+        plt.fill_between(x, means - stds, means + stds,
+                        color=colors[i % len(colors)], alpha=0.2)
 
     # Adding labels and title
-    plt.xlabel('Epochs')
-    plt.ylabel('Mean Accuracy')
-    plt.title('Mean Accuracies with Variance for Different Strategies')
+    plt.xlabel('iterations')
+    plt.ylabel(f'Mean {description}')
+    plt.title(f'Mean {description} with Standard Deviation for Different Strategies')
     plt.legend()
 
     # Show plot
     plt.show()
-
-    wandb.finish()
-
 
 def extract_system_metrics(project_name, metric, description):
     # Login to the wandb
@@ -2016,78 +2011,7 @@ def extract_system_metrics(project_name, metric, description):
 
     # Fetch the logged metrics for each run
     for run in runs:
-        history = run.history(stream="system")
-        history['run_id'] = run.id
-        history['strategy_name'] = run.name
-        data = pd.concat([data, history], ignore_index=True)
-
-    data.to_excel("output1.xlsx", index=False)
-
-    # Add a helper column for the order of appearance within each strategy group
-    data['order'] = data.groupby(['strategy_name']).cumcount() // history['strategy_name'].nunique()
-
-    # Group by 'strategy' and 'order', then calculate mean accuracy and variance
-    grouped = data.groupby(['strategy_name', 'order'])[metric]
-    mean_accuracies = grouped.mean().reset_index()
-    variances = grouped.var().reset_index()
-
-    # Pivot the table to have strategies as columns
-    result_means = mean_accuracies.pivot(index='order', columns='strategy_name', values=metric)
-    result_variances = variances.pivot(index='order', columns='strategy_name', values=metric)
-
-    # Convert the pivoted DataFrame to a dictionary with strategies as keys and lists of means as values
-    result_means_dict = result_means.to_dict(orient='list')
-    result_variances_dict = result_variances.to_dict(orient='list')
-
-    # Plotting
-    plt.figure(figsize=(12, 6))
-
-    # Define colors and line styles for each strategy
-    colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']
-    # linestyles = ['-', '--', '-.', ':']
-
-    # Loop through each strategy
-    for i, strategy in enumerate(result_means_dict.keys()):
-        means = result_means_dict[strategy]
-        std_dev = np.sqrt(result_variances_dict[strategy])
-        x = range(1, len(means) + 1)
-        
-        # Plot means for this strategy with customizations
-        plt.plot(x, means,
-                 label=strategy,
-                 linewidth=2,                 # Increase line width
-                 color=colors[i % len(colors)]) # Set different colors
-                #  linestyle=linestyles[i % len(linestyles)])# Set different line styles
-        
-        # Add variance as shadowed region
-        plt.fill_between(x, np.subtract(means, std_dev), np.add(means, std_dev),
-                         color=colors[i % len(colors)], alpha=0.2)
-
-    # Adding labels and title
-    plt.xlabel('Epochs')
-    plt.ylabel(f'Mean {description}')
-    plt.title(f'Mean {description} with Variance for Different Strategies')
-    plt.legend()
-
-    # Show plot
-    plt.show()
-
-    wandb.finish()
-
-
-
-def extract_GPU_metrics(project_name, metric, description):
-    # Login to the wandb
-    wandb.login()
-    # Extract the metrics from WandB after all the runs
-    api = wandb.Api()
-    runs = api.runs(project_name)
-    # Initialize empty DataFrame
-    data = pd.DataFrame()
-
-    # Fetch the logged metrics for each run
-    for run in runs:
-        history = run.history(stream="system")
+        history = run.history(stream="system") # 'default or system'
         history['run_id'] = run.id
         history['strategy_name'] = run.name
         data = pd.concat([data, history], ignore_index=True)
@@ -2101,14 +2025,39 @@ def extract_GPU_metrics(project_name, metric, description):
     # Create a helper column to detect changes in strategy_name
     data['index_run'] = data.groupby("run_id").cumcount()
 
-    mean_gpu_usage = data.groupby(["strategy_name", "index_run"])[metric, "_runtime"].mean().reset_index()
+    df_mean= data.groupby(["strategy_name", "index_run"])[metric, "_runtime"].mean().reset_index()
+    df_std = data.groupby(["strategy_name", "index_run"])[metric].std().reset_index()
+    df_std['_step'] = data.groupby(["strategy_name", "index_run"])["_step"].mean().reset_index()["_step"]
 
 
     # Pivot data to have strategies as columns
-    pivot_table = mean_gpu_usage.pivot(index='_runtime', columns='strategy_name', values=metric)
-    pivot_table.interpolate(inplace=True, limit=30)
+    pivot_table = df_mean.pivot(index='_runtime', columns='strategy_name', values=metric)
+    pivot_table['the_index'] = range(len(pivot_table))
+    pivot_table_std = df_std.pivot(index='_step', columns='strategy_name', values=metric)
+
+    # akima for gpu.0.gpu and cpu, linear for gpu.0.temp
+    pivot_table.interpolate(method='linear', inplace=True, limit=50)
+    pivot_table_std.interpolate(method='akima', inplace=True, limit=50)
+
+    if metric == "system.gpu.0.gpu":
+        # Number of NaN values to fill
+        n_to_fill = 100
+
+        # Iterate through the DataFrame to identify sequences of NaNs
+        fill_count = 0
+        for index, value in zip(pivot_table['the_index'], pivot_table['Cumulative']):
+            if np.isnan(value):
+                fill_count += 1
+            else:
+                if fill_count > 0 and fill_count <= n_to_fill:
+                    start_index = index - fill_count
+                    pivot_table.iloc[start_index:index, pivot_table.columns.get_loc('Cumulative')] = pivot_table.iloc[start_index-50:index-50, pivot_table.columns.get_loc('Cumulative')]
+                fill_count = 0
 
     # Plotting
+
+    pivot_table.drop(columns="the_index", inplace=True)
+
     plt.figure(figsize=(12, 6))
 
     # Define colors for each strategy
@@ -2117,6 +2066,7 @@ def extract_GPU_metrics(project_name, metric, description):
     # Loop through each strategy
     for i, strategy in enumerate(pivot_table.columns):
         means = pivot_table[strategy]
+        stds = pivot_table_std[strategy] 
         x = pivot_table.index / (60*60)
         # Plot means for this strategy with customizations
         plt.plot(x, means,
@@ -2124,17 +2074,14 @@ def extract_GPU_metrics(project_name, metric, description):
                 linewidth=2,
                 color=colors[i % len(colors)])
         
-        # Calculate standard deviation for shadowed region
-        std_dev = data[data['strategy_name'] == strategy][metric].std()
-        
         # Add variance as shadowed region
-        plt.fill_between(x, means - std_dev, means + std_dev,
+        plt.fill_between(x, means - stds, means + stds,
                         color=colors[i % len(colors)], alpha=0.2)
 
     # Adding labels and title
     plt.xlabel('Runtime (h)')
-    plt.ylabel('Mean GPU Power Usage (W)')
-    plt.title('Mean GPU Power Usage with Standard Deviation for Different Strategies')
+    plt.ylabel(f'Mean {description}')
+    plt.title(f'Mean {description} with Standard Deviation for Different Strategies')
     plt.legend()
 
     # Show plot
@@ -2166,17 +2113,21 @@ def extract_energy_consumption(project_name, metric):
     # Create a helper column to detect changes in strategy_name
     data['index_run'] = data.groupby("run_id").cumcount()
 
-    mean_gpu_usage = data.groupby(["strategy_name", "index_run"])[metric, "_runtime"].mean().reset_index()
-    std_gpu_usage = data.groupby(["strategy_name", "index_run"])[metric, "_runtime"].std().reset_index()
+    df_mean= data.groupby(["strategy_name", "index_run"]).agg(
+    mean_metric=(metric, 'mean'),
+    std_metric=(metric, 'std'),
+    mean_runtime=('_runtime', 'mean')
+    ).reset_index()
 
     # Pivot data to have strategies as columns
-    pivot_table = mean_gpu_usage.pivot(index='_runtime', columns='strategy_name', values=metric)
+    pivot_table = df_mean.pivot(index='mean_runtime', columns='strategy_name', values='mean_metric')
     pivot_table.interpolate(inplace=True, limit=30)
-    pivot_table_std = std_gpu_usage.pivot(index='_runtime', columns='strategy_name', values=metric)
+
+    pivot_table_std = df_mean.pivot(index='mean_runtime', columns='strategy_name', values='std_metric')
     pivot_table_std.interpolate(inplace=True, limit=30)
 
     # Lists to store area and standard deviation values
-    areas = []
+    energy_list = []
     std_devs = []
 
     # Loop through each strategy
@@ -2184,33 +2135,46 @@ def extract_energy_consumption(project_name, metric):
         means = pivot_table[strategy].dropna()
         x = means.index
 
+        stds = pivot_table_std[strategy].dropna()
+        x_stds = stds.index
         
         # Calculate area under the curve using the trapezoidal rule
-        area = np.trapz(means, x)
-        
+        energy = np.trapz(means, x) / 1e6
+        std_dev = np.trapz(stds, x_stds)
         
         # Append area and standard deviation values to the lists
-        areas.append(area)
+        energy_list.append(energy)
         std_devs.append(std_dev)
 
     # Create a DataFrame to hold the data for the bar plot
     bar_data = pd.DataFrame({
         'Strategy': pivot_table.columns,
-        'Area': areas,
+        'Area': energy_list,
         'Std Dev': std_devs
     })
 
     # Plotting
     plt.figure(figsize=(10, 6))
 
-    # Bar plot for areas and standard deviations
-    plt.bar(bar_data['Strategy'], bar_data['Area'], yerr=bar_data['Std Dev'], capsize=5)
+    # Bar plot for energy_list and standard deviations
+    bars = plt.bar(bar_data['Strategy'], bar_data['Area'], capsize=5)
+
+    # Bar plot for energy_list and standard deviations
+    plt.bar(bar_data['Strategy'], bar_data['Area'], capsize=5)
 
     # Adding labels and title
     plt.xlabel('Strategy')
-    plt.ylabel('Energy (J)')
+    plt.ylabel('Energy (MJ)')
     plt.title('Energy used for training for different strategies')
     plt.xticks(rotation=45, ha='right')
+
+    # Adding text labels above the bars
+    for bar, energy in zip(bars, bar_data['Area']):
+        plt.annotate(f'{energy:.2f} MJ', # Text label
+                    xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()), # Position
+                    xytext=(0, 3),  # Offset from the top of the bar
+                    textcoords='offset points',
+                    ha='center', va='bottom') # Text alignment
 
     # Show plot
     plt.tight_layout()
@@ -2301,9 +2265,9 @@ def extract_convergence(project_name):
         # For number of epochs
         strategy_data = []
         for i in range(num_runs):
-            column_name = f'{strategy}{i}'
-            if column_name in df:
-                strategy_data.extend(df[column_name])
+            Cumulative = f'{strategy}{i}'
+            if Cumulative in df:
+                strategy_data.extend(df[Cumulative])
         plt.plot(range(len(strategy_data)), strategy_data, marker='o', label=strategy)
 
     # For number of epochs
@@ -3286,8 +3250,8 @@ def wandb_import():
     run_df.to_csv("project1.csv")
 
 if __name__ == "__main__":
-    # project_name = "New_Classes_50_classes_ES_ACC_patience_25_batchsize128_lr0.001_44_epochs_resource_efficiency"
-    project_name = "New_Classes_50_classes_ES_ACC_patience_25_batchsize128_lr0.001_50_epochs_eval_like_train"
+    project_name = "New_Classes_50_classes_ES_ACC_patience_25_batchsize128_lr0.001_44_epochs_resource_efficiency"
+    # project_name = "New_Classes_50_classes_ES_ACC_patience_25_batchsize128_lr0.001_50_epochs_eval_like_train"
     # project_name = "New_Instances_10_classes"
     # ES_metric = ["Top1_Acc_Stream", "Loss_Stream"]
 
@@ -3304,9 +3268,13 @@ if __name__ == "__main__":
     # extract_metrics(project_name)
     # # extract_accuracy_valid(project_name)
     # extract_convergence(project_name)
-    # extract_system_metrics(project_name, "system.gpu.0.gpu", "GPU Power Usage")
+    # extract_system_metrics(project_name, "system.gpu.0.gpu", "GPU Utilization")
+    # extract_system_metrics(project_name, "system.gpu.0.temp", "GPU Temperature (°C)")
+    # extract_system_metrics(project_name, "system.cpu", "CPU Utilization (%)")
+    # extract_system_metrics(project_name, "system.memory", "System Memory Utilization (%)")
+    extract_metrics(project_name, "Top1_Acc_Stream/eval_phase/test_stream/Task000", "Accuracy (%) on Train Set")
     # extract_GPU_metrics(project_name, "system.gpu.0.powerWatts", "GPU Power Usage")
-    extract_energy_consumption(project_name, "system.gpu.0.powerWatts")
+    # extract_energy_consumption(project_name, "system.gpu.0.powerWatts")
     # project_name = "CWRStar_hiperparameter_search_50_classes_ni_bs128"
     # CWRStar_hiperparameter_search(project_name, ES_metric[0], "max", "ni")
     # project_name = "GEM_hiperparameter_search_50_classes_ni_bs128"
