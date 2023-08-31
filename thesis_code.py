@@ -1934,7 +1934,6 @@ def train_iteratively_ES(project_name, num_runs):
             wandb.finish()
 
 
-
 def extract_metrics(project_name, metric, description):
     # Login to the wandb
     wandb.login()
@@ -1953,11 +1952,11 @@ def extract_metrics(project_name, metric, description):
 
     data.to_excel("metrics.xlsx", index=False)
 
-    # Calculate mean gpu_usage per runtime for each strategy
-    data.interpolate(inplace=True)
 
     # Create a helper column to detect changes in strategy_name
     data['index_run'] = data.groupby("run_id").cumcount()
+    grouped = data.groupby(["strategy_name", "run_id"])
+    data[metric] = grouped[metric].apply(lambda group: group.interpolate())
     data[metric] = data[metric]*100
 
     df_mean = data.groupby(["strategy_name", "index_run"])[metric, "_step"].mean().reset_index()
@@ -1968,8 +1967,9 @@ def extract_metrics(project_name, metric, description):
     pivot_table = df_mean.pivot(index='_step', columns='strategy_name', values=metric)
     pivot_table_std = df_std.pivot(index='_step', columns='strategy_name', values=metric)
 
-    pivot_table.interpolate(method='akima', inplace=True, limit=10)
-    pivot_table_std.interpolate(method='akima', inplace=True, limit=10)
+    # linear for test set accuracy, akima for train set accuracy
+    pivot_table.interpolate(method='linear', inplace=True, limit=10)
+    pivot_table_std.interpolate(method='linear', inplace=True, limit=10)
 
     plt.figure(figsize=(12, 6))
 
@@ -2027,7 +2027,7 @@ def extract_system_metrics(project_name, metric, description):
 
     df_mean= data.groupby(["strategy_name", "index_run"])[metric, "_runtime"].mean().reset_index()
     df_std = data.groupby(["strategy_name", "index_run"])[metric].std().reset_index()
-    df_std['_step'] = data.groupby(["strategy_name", "index_run"])["_step"].mean().reset_index()["_step"]
+    df_std['_step'] = data.groupby(["strategy_name", "index_run"])["_runtime"].mean().reset_index()["_runtime"]
 
 
     # Pivot data to have strategies as columns
@@ -2036,23 +2036,10 @@ def extract_system_metrics(project_name, metric, description):
     pivot_table_std = df_std.pivot(index='_step', columns='strategy_name', values=metric)
 
     # akima for gpu.0.gpu and cpu, linear for gpu.0.temp
-    pivot_table.interpolate(method='linear', inplace=True, limit=50)
-    pivot_table_std.interpolate(method='akima', inplace=True, limit=50)
+    pivot_table.interpolate(method='linear', inplace=True, limit=20)
+    pivot_table_std.interpolate(method='linear', inplace=True, limit=20)
 
-    if metric == "system.gpu.0.gpu":
-        # Number of NaN values to fill
-        n_to_fill = 100
 
-        # Iterate through the DataFrame to identify sequences of NaNs
-        fill_count = 0
-        for index, value in zip(pivot_table['the_index'], pivot_table['Cumulative']):
-            if np.isnan(value):
-                fill_count += 1
-            else:
-                if fill_count > 0 and fill_count <= n_to_fill:
-                    start_index = index - fill_count
-                    pivot_table.iloc[start_index:index, pivot_table.columns.get_loc('Cumulative')] = pivot_table.iloc[start_index-50:index-50, pivot_table.columns.get_loc('Cumulative')]
-                fill_count = 0
 
     # Plotting
 
@@ -3268,11 +3255,12 @@ if __name__ == "__main__":
     # extract_metrics(project_name)
     # # extract_accuracy_valid(project_name)
     # extract_convergence(project_name)
+    # extract_system_metrics(project_name, "system.gpu.0.powerWatts", "GPU Power Usage (W)")
     # extract_system_metrics(project_name, "system.gpu.0.gpu", "GPU Utilization")
     # extract_system_metrics(project_name, "system.gpu.0.temp", "GPU Temperature (°C)")
     # extract_system_metrics(project_name, "system.cpu", "CPU Utilization (%)")
-    # extract_system_metrics(project_name, "system.memory", "System Memory Utilization (%)")
-    extract_metrics(project_name, "Top1_Acc_Stream/eval_phase/test_stream/Task000", "Accuracy (%) on Train Set")
+    extract_system_metrics(project_name, "system.memory", "System Memory Utilization (%)")
+    # extract_metrics(project_name, "Top1_Acc_Stream/eval_phase/test_stream/Task000", "Accuracy (%) on whole Test Set")
     # extract_GPU_metrics(project_name, "system.gpu.0.powerWatts", "GPU Power Usage")
     # extract_energy_consumption(project_name, "system.gpu.0.powerWatts")
     # project_name = "CWRStar_hiperparameter_search_50_classes_ni_bs128"
